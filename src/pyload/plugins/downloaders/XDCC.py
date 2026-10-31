@@ -826,6 +826,19 @@ class XDCC(BaseDownloader):
             ctcp=True
         )
 
+    def _parse_dcc_ip(self, raw_ip_str):
+        """
+        Safely convert a raw DCC integer string to a dotted-quad IPv4 string.
+        Returns the IP string, or None if invalid or out of bounds.
+        """
+        try:
+            raw_ip = int(raw_ip_str)
+            if not (0 <= raw_ip <= 0xFFFFFFFF):
+                return None
+            return socket.inet_ntoa(struct.pack("!I", raw_ip))
+        except (struct.error, ValueError, OverflowError):
+            return None
+
     def process(self, pyfile):
         proto = self.info["pattern"]["PROTO"]
         server = self.info["pattern"]["SERVER"]
@@ -1126,7 +1139,6 @@ class XDCC(BaseDownloader):
         # Check for regular DCC SEND
         m = self.RE_XDCC.match(text)
         if m:
-            ip = socket.inet_ntoa(struct.pack("!I", int(m.group("IP"))))
             self.dcc_port = int(m.group("PORT"))
             self.dcc_file_name = m.group("NAME")
             file_size = int(m.group("SIZE") or 0)
@@ -1145,7 +1157,8 @@ class XDCC(BaseDownloader):
 
             else:
                 self.log_debug(self._("Received XDCC SEND (unsecured) request"))
-                if not is_global_address(ip):
+                ip = self._parse_dcc_ip(m.group("IP"))
+                if not ip or not is_global_address(ip):
                     self.log_error(self._("Private or reserved IP addresses received from bot"))
                     self.fail(self._("Private or reserved IP addresses received from bot"))
 
@@ -1155,8 +1168,8 @@ class XDCC(BaseDownloader):
             # Check for SSL DCC SSEND
             m = self.RE_XDCC_SSEND.match(text)
             if m:
-                ip = socket.inet_ntoa(struct.pack("!I", int(m.group("IP"))))
-                if not is_global_address(ip):
+                ip = self._parse_dcc_ip(m.group("IP"))
+                if not ip or not is_global_address(ip):
                     self.log_error(self._("Private or reserved IP addresses received from bot"))
                     self.fail(self._("Private or reserved IP addresses received from bot"))
 
