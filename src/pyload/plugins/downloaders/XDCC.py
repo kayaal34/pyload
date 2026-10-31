@@ -443,12 +443,7 @@ class IRC:
                 return
 
             # Private message from bot to us?
-            if (
-                "@" not in origin
-                or (origin[0 : len(bot)] != bot and origin.split("@")[1] != bot_host)
-                or args[0][0 : len(self.nick)] != self.nick
-                or command not in ("PRIVMSG", "NOTICE")
-            ):
+            if not self.is_message_from_target(origin, command, args, bot, bot_host):
                 continue
 
             text = args[1]
@@ -482,11 +477,8 @@ class IRC:
                 return
 
             # Private message from bot to us?
-            if (
-                "@" not in origin
-                or (origin[0 : len(bot)] != bot and origin.split("@")[1] != bot_host)
-                or args[0][0 : len(self.nick)] != self.nick
-                or command not in ("PRIVMSG", "NOTICE", "INVITE")
+            if not self.is_message_from_target(
+                origin, command, args, bot, bot_host, allowed_commands=("PRIVMSG", "NOTICE", "INVITE")
             ):
                 continue
 
@@ -552,6 +544,38 @@ class IRC:
 
             else:
                 return None
+
+    def is_message_from_target(
+        self, origin, command, args, target_bot, target_host=None, allowed_commands=("PRIVMSG", "NOTICE")
+    ):
+        """
+        Validates that an incoming IRC message originated from the expected bot/service
+        and was privately addressed to our client nickname.
+        """
+        if not origin or not command or not args or len(args) < 2:
+            return False
+
+        if command not in allowed_commands:
+            return False
+
+        if args[0].lower() != self.nick.lower():
+            return False
+
+        sender_nick = origin.split("!", 1)[0] if "!" in origin else origin.split("@", 1)[0]
+        sender_host = origin.split("@", 1)[1] if "@" in origin else None
+
+        if sender_nick.lower() != target_bot.lower():
+            return False
+
+        if target_host and (not sender_host or sender_host.lower() != target_host.lower()):
+            self.plugin.log_warning(
+                self._("Rejected message from '{}' due to host mismatch ('{}' != '{}')").format(
+                    sender_nick, sender_host or "unknown", target_host
+                )
+            )
+            return False
+
+        return True
 
     @lock
     def xdcc_request_pack(self, bot, pack):
@@ -620,19 +644,7 @@ class IRC:
                 origin, command, args = self.get_irc_command()
 
                 # Private message from bot to us?
-                if (
-                    origin
-                    and command
-                    and args
-                    and "@" in origin
-                    and (
-                        origin[0 : len(bot)] == bot
-                        or bot_host
-                        and origin.split("@")[1] == bot_host
-                    )
-                    and args[0][0 : len(self.nick)] == self.nick
-                    and command in ("PRIVMSG", "NOTICE")
-                ):
+                if self.is_message_from_target(origin, command, args, bot, bot_host):
 
                     text = args[1]
                     sender_nick = origin.split("@")[0].split("!")[0]
@@ -679,18 +691,7 @@ class IRC:
             origin, command, args = self.get_irc_command()
 
             # Private message from bot to us?
-            if (
-                origin
-                and command
-                and args
-                and (
-                    origin[0 : len(bot)] == bot
-                    or bot_host
-                    and origin.split("@")[1] == bot_host
-                )
-                and args[0][0 : len(self.nick)] == self.nick
-                and command in ("PRIVMSG", "NOTICE")
-            ):
+            if self.is_message_from_target(origin, command, args, bot, bot_host):
 
                 text = args[1]
                 pack_info = text.split()
@@ -1088,23 +1089,19 @@ class XDCC(BaseDownloader):
             return
 
         #: ERR_CANTSENDTOUSER
-        if command == "531" and args[0] == nick and args[1] == bot:
+        if (
+            command == "531"
+            and len(args) >= 3
+            and args[0].casefold() == nick.casefold()
+            and args[1].casefold() == bot.casefold()
+        ):
             text = args[2]
             self.log_error("<{}> {}".format(bot, text))
             self.fail(text)
 
         # Private message from bot to us?
         bot_host = self.irc_client.get_bot_host(bot)
-        if (
-            "@" not in origin
-            or (
-                origin[0 : len(bot)] != bot
-                and bot_host
-                and origin.split("@")[1] != bot_host
-            )
-            or args[0][0 : len(nick)] != nick
-            or command not in ("PRIVMSG", "NOTICE")
-        ):
+        if not self.irc_client.is_message_from_target(origin, command, args, bot, bot_host):
             return
 
         text = args[1]
