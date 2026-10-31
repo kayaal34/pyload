@@ -14,7 +14,8 @@ from pyload.core.network.exceptions import Abort
 from pyload.core.utils import format
 from pyload.core.utils.convert import to_bytes, to_str
 from pyload.core.utils.struct.lock import lock
-from pyload.core.utils.web.check import get_public_address
+from pyload.core.utils.web.check import get_public_address, is_global_address
+from pyload.core.utils.web.convert import host_to_ip
 
 from ..base.addon import threaded
 from ..base.downloader import BaseDownloader
@@ -131,12 +132,17 @@ class IRC:
             )
             return False
 
+        host_ips = host_to_ip(host)
+        if not any(is_global_address(ip) for ip in host_ips):
+            self.plugin.log_error(self._("IRC Server {} resolves to private or reserved IP addresses received").format(host))
+            return False
+
         self.plugin.log_info(self._("Connecting to: {}:{}").format(host, port))
         self.host = host
         self.port = port
 
         self.irc_sock.settimeout(90)
-        self.irc_sock.connect((host, port))
+        self.irc_sock.connect((host_ips[0], port))
         self.irc_sock.settimeout(None)
 
         #: flush input
@@ -721,7 +727,7 @@ class IRC:
 class XDCC(BaseDownloader):
     __name__ = "XDCC"
     __type__ = "downloader"
-    __version__ = "0.57"
+    __version__ = "0.58"
     __status__ = "testing"
 
     __pattern__ = r"(?P<PROTO>xdccs?)://(?P<SERVER>.*?)/#?(?P<CHAN>.*?)/(?P<BOT>.*?)/#?(?P<PACK>\d+)/?"
@@ -802,6 +808,9 @@ class XDCC(BaseDownloader):
     def xdcc_initiate_passive(self, xdcc_token):
         # Send CTCP DCC SEND reply with our ip/port
         external_ip = get_public_address()
+        if not external_ip:
+            self.log_error(self._("Could not determine external IP address for passive XDCC"))
+            return
         ip_int = struct.unpack("!I", socket.inet_aton(external_ip))[0]
 
         self.irc_client.send_private_message(
@@ -1139,6 +1148,10 @@ class XDCC(BaseDownloader):
 
             else:
                 self.log_debug(self._("Received XDCC SEND (unsecured) request"))
+                if not is_global_address(ip):
+                    self.log_error(self._("Private or reserved IP addresses received from bot"))
+                    self.fail(self._("Private or reserved IP addresses received from bot"))
+
                 self.do_download(ip, self.dcc_port, False,  self.dcc_file_name, file_size)
 
         else:
@@ -1146,6 +1159,10 @@ class XDCC(BaseDownloader):
             m = self.RE_XDCC_SSEND.match(text)
             if m:
                 ip = socket.inet_ntoa(struct.pack("!I", int(m.group("IP"))))
+                if not is_global_address(ip):
+                    self.log_error(self._("Private or reserved IP addresses received from bot"))
+                    self.fail(self._("Private or reserved IP addresses received from bot"))
+
                 self.dcc_port = int(m.group("PORT"))
                 self.dcc_file_name = m.group("NAME")
                 file_size = int(m.group("SIZE") or 0)
