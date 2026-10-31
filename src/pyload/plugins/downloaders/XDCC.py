@@ -7,6 +7,7 @@ import struct
 import threading
 import time
 from enum import IntEnum
+from urllib.parse import unquote
 
 import certifi
 
@@ -60,6 +61,21 @@ class IRC:
     def _data_available(self):
         fdset = select.select([self.irc_sock], [], [], 0)
         return self.irc_sock in fdset[0]
+
+    def _send_line(self, line):
+        """
+        Send a single IRC line terminated by CRLF.
+        Guards against CRLF injection by stripping internal newlines.
+        """
+        if not self.irc_sock:
+            return
+
+        clean_line = line.rstrip("\r\n")
+        if "\r" in clean_line or "\n" in clean_line:
+            self.plugin.log_warning(self._("CRLF injection attempt detected in IRC command"))
+            clean_line = clean_line.replace("\r", "").replace("\n", "")
+
+        self.irc_sock.send(to_bytes(clean_line + "\r\n"))
 
     def _get_response_line(self, timeout=5):
         start_time = time.monotonic()
@@ -154,7 +170,7 @@ class IRC:
         if use_ssl == IRC.SSLUsage.STARTTLS:
             if self.get_server_capabilities("tls", force_query=True, end_caps=False):
                 self.plugin.log_debug(self._("TLS via STARTTLS supported, attempting connection upgrade"))
-                self.irc_sock.send(to_bytes("STARTTLS\r\n"))
+                self._send_line("STARTTLS")
                 start_time = time.monotonic()
                 while time.monotonic() - start_time < 30:
                     origin, command, args = self.get_irc_command()
@@ -207,10 +223,8 @@ class IRC:
             if not self._get_response_line():
                 break
 
-        self.irc_sock.send(to_bytes("NICK {}\r\n".format(self.nick)))
-        self.irc_sock.send(
-            to_bytes("USER {} {} bla :{}\r\n".format(self.ident, host, self.realname))
-        )
+        self._send_line("NICK {}".format(self.nick))
+        self._send_line("USER {} {} bla :{}".format(self.ident, host, self.realname))
 
         start_time = time.monotonic()
         while time.monotonic() - start_time < 30:
@@ -251,7 +265,7 @@ class IRC:
             self.plugin.log_info(
                 self._("Disconnecting from {}:{}").format(self.host, self.port)
             )
-            self.irc_sock.send(b"QUIT :byebye\r\n")
+            self._send_line("QUIT :byebye")
             self.plugin.log_debug("Disconnected")
             self.connected = False
 
@@ -281,7 +295,8 @@ class IRC:
                 self.plugin.log_info(self._("Querying server for {} capability").format(capability))
 
             if force_query or not self.server_capabilities:
-                self.irc_sock.send(to_bytes("CAP LS\r\nPING :{}\r\n".format(self.host)))
+                self._send_line("CAP LS")
+                self._send_line("PING :{}".format(self.host))
                 self.sent_caps = True
                 start_time = time.monotonic()
                 while time.monotonic() - start_time < 30:
@@ -308,7 +323,7 @@ class IRC:
 
     def end_capabilities_mode(self):
         if self.sent_caps:
-            self.irc_sock.send(to_bytes("CAP END\r\n"))
+            self._send_line("CAP END")
             self.sent_caps = False
 
     @lock
@@ -320,7 +335,7 @@ class IRC:
 
             if command == "PING":
                 self.plugin.log_debug(f"[{args[0]}] Ping? Pong!")
-                self.irc_sock.send(to_bytes("PONG :{}\r\n".format(args[0])))
+                self._send_line("PONG :{}".format(args[0]))
 
             elif origin and command == "PRIVMSG":
                 sender_nick = origin.split("@")[0].split("!")[0]
@@ -337,24 +352,16 @@ class IRC:
                             self.plugin.log_debug(
                                 self._("[{}] CTCP VERSION").format(sender_nick)
                             )
-                            self.irc_sock.send(
-                                to_bytes(
-                                    "NOTICE {} :\x01VERSION {}\x01\r\n".format(
-                                        sender_nick, "pyLoad! IRC Interface"
-                                    )
-                                )
-                            )
+                            self._send_line("NOTICE {} :\x01VERSION {}\x01".format(sender_nick, "pyLoad! IRC Interface"))
 
                         elif ctcp_command == "TIME":
                             self.plugin.log_debug(
                                 self._("[{}] CTCP TIME").format(sender_nick)
                             )
-                            self.irc_sock.send(
-                                to_bytes(
-                                    "NOTICE {} :\x01{}\x01\r\n".format(
-                                        sender_nick,
-                                        time.strftime("%a %b %d %H:%M:%S %Y"),
-                                    )
+                            self._send_line(
+                                "NOTICE {} :\x01{}\x01".format(
+                                    sender_nick,
+                                    time.strftime("%a %b %d %H:%M:%S %Y"),
                                 )
                             )
 
@@ -362,13 +369,7 @@ class IRC:
                             self.plugin.log_debug(
                                 self._("[{}] Ping? Pong!").format(sender_nick)
                             )
-                            self.irc_sock.send(
-                                to_bytes(
-                                    "NOTICE {} :\x01PING {}\x01\r\n".format(
-                                        sender_nick, ctcp_args
-                                    )
-                                )
-                            )  # NOTE: PING is not a typo
+                            self._send_line("NOTICE {} :\x01PING {}\x01".format(sender_nick, ctcp_args))  # NOTE: PING is not a typo
 
                         else:
                             break
@@ -386,7 +387,7 @@ class IRC:
         chan = "#" + chan if chan[0] != "#" else chan
 
         self.plugin.log_info(self._("Joining channel {}").format(chan))
-        self.irc_sock.send(to_bytes("JOIN {}\r\n".format(chan)))
+        self._send_line("JOIN {}".format(chan))
 
         start_time = time.monotonic()
         while time.monotonic() - start_time < 30:
@@ -412,14 +413,12 @@ class IRC:
 
     @lock
     def send_private_message(self, bot, message, ctcp=False):
+        clean_bot = bot.replace("\r", " ").replace("\n", " ").split()[0]
+        clean_msg = message.replace("\r", "").replace("\n", "")
         if ctcp:
-            self.irc_sock.send(
-                to_bytes("PRIVMSG {} :\x01{}\x01\r\n".format(bot, message))
-            )
+            self._send_line("PRIVMSG {} :\x01{}\x01".format(clean_bot, clean_msg))
         else:
-            self.irc_sock.send(
-                to_bytes("PRIVMSG {} :{}\r\n".format(bot, message))
-            )
+            self._send_line("PRIVMSG {} :{}".format(clean_bot, clean_msg))
     @lock
     def nickserv_identify(self, password):
         self.plugin.log_info(self._("Authenticating nickname"))
@@ -502,7 +501,7 @@ class IRC:
     @lock
     def is_bot_online(self, bot):
         self.plugin.log_info(self._("Checking if bot '{}' is online").format(bot))
-        self.irc_sock.send(to_bytes("WHOIS {}\r\n".format(bot)))
+        self._send_line("WHOIS {}".format(bot))
 
         start_time = time.monotonic()
         while time.monotonic() - start_time < 30:
@@ -841,10 +840,24 @@ class XDCC(BaseDownloader):
 
     def process(self, pyfile):
         proto = self.info["pattern"]["PROTO"]
-        server = self.info["pattern"]["SERVER"]
-        chan = self.info["pattern"]["CHAN"]
-        bot = self.info["pattern"]["BOT"]
-        pack = self.info["pattern"]["PACK"]
+        server = unquote(self.info["pattern"]["SERVER"]).strip()
+        chan = unquote(self.info["pattern"]["CHAN"]).strip()
+        bot = unquote(self.info["pattern"]["BOT"]).strip()
+        pack = self.info["pattern"]["PACK"].strip()
+
+        # Enforce no CR, LF, or NULL bytes in URL components
+        for name, val in (("SERVER", server), ("CHAN", chan), ("BOT", bot), ("PACK", pack)):
+            if any(c in val for c in ("\r", "\n", "\0")):
+                self.fail(self._("Invalid characters (CRLF/NULL) in URL component: {}").format(name))
+
+        # Validate channel name (no spaces, control chars, colons, or commas)
+        clean_chan = chan[1:] if chan.startswith("#") else chan
+        if not clean_chan or any(c in clean_chan for c in (" ", ",", "\x07", ":")):
+            self.fail(self._("Invalid IRC channel name in URL: {}").format(chan))
+
+        # Validate bot nickname (alphanumeric and allowed IRC special characters)
+        if not re.match(r"^[a-zA-Z0-9_\-\[\]\\^{}|`]+$", bot):
+            self.fail(self._("Invalid IRC bot nickname in URL: {}").format(bot))
 
         tls_opts = [
             _x.split("/")
